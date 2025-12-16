@@ -3,56 +3,56 @@ const { Client } = require('@notionhq/client');
 require('dotenv').config();
 
 // Configuration
-const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID; // Ensure this is set in .env
-const TARGET_URL = 'https://tradingeconomics.com/commodities';
+const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID;
+const COMMODITIES_URL = 'https://tradingeconomics.com/commodities';
+const STOCKS_URL = 'https://tradingeconomics.com/stocks';
 
-async function scrapeCommodities() {
-    console.log('Launching browser...');
-    const browser = await puppeteer.launch({
-        headless: "new",
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
-    });
+const STOCK_WHITELIST = [
+    'US500', 'US30', 'JP225', 'SHANGHAI', 'TSX', 'CSI 300', 'HNX', 'VN'
+];
+
+async function scrapeTable(browser, url, whitelist = null, tableType = 'generic') {
     const page = await browser.newPage();
-
-    console.log(`Navigating to ${TARGET_URL}...`);
-    // Set a realistic user agent
+    // Use the specific UA that was verified to work
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
 
-    await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+    try {
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+    } catch (e) {
+        console.error(`[Error] Failed to load ${url}: ${e.message}`);
+        await page.close();
+        return [];
+    }
 
-    console.log('Extracting data...');
-    const commodities = await page.evaluate(() => {
+    const items = await page.evaluate((whitelist) => {
         const data = [];
-        // The table structure on Trading Economics often uses specific classes or IDs.
-        // Based on inspection, we look for rows in the main table.
-        // We'll try to find the main table by looking for headers like 'Price', 'Change', etc.
-
-        // Strategy: specific rows often have attributes like 'data-symbol' or are within a specific table class.
-        // Let's iterate over ALL rows in tables that look like data tables.
-
         const rows = document.querySelectorAll('tr');
+        console.log(`[Debug] Total rows found: ${rows.length}`);
 
-        rows.forEach(row => {
+        if (rows.length === 0) {
+            console.log('[Debug] No rows found in document!');
+            return [];
+        }
+
+        rows.forEach((row) => {
             const cells = row.querySelectorAll('td');
-            if (cells.length < 8) return; // Need at least 8 columns now
+            if (cells.length < 2) return;
 
-            const nameEl = cells[0].querySelector('b');
+            const nameEl = cells[0].querySelector('b') || cells[0].querySelector('a');
             if (!nameEl) return;
 
             const rawName = nameEl.innerText.trim();
-            const rawText = cells[0].innerText.trim();
-            // The unit often appears after the name. The cell text is "Name\nUnit". 
-            // Or "Name Unit". Let's try to extract it by removing the Name part from the full text.
-            // Or looking for the text node.
 
+            if (whitelist && !whitelist.includes(rawName)) {
+                return;
+            }
+
+            const rawText = cells[0].innerText.trim();
             let unit = '';
-            // Strategy 1: Text node check
             if (nameEl.nextSibling && nameEl.nextSibling.nodeType === 3) {
                 unit = nameEl.nextSibling.textContent.trim();
             }
-            // Strategy 2: If node check fails, parse innerText
             if (!unit) {
-                // Example: "Bitumen\nCNY/T"
                 const parts = rawText.split('\n');
                 if (parts.length > 1) {
                     unit = parts[parts.length - 1].trim();
@@ -61,50 +61,100 @@ async function scrapeCommodities() {
 
             const name = unit ? `${rawName} (${unit})` : rawName;
 
-            const price = parseFloat(cells[1].innerText.trim().replace(/,/g, ''));
-            const change = parseFloat(cells[2].innerText.trim().replace(/,/g, ''));
+            const parseVal = (str) => {
+                if (!str) return null;
+                return parseFloat(str.replace(/,/g, ''));
+            };
 
-            // For percentages, we divide by 100 because Notion expects 0.15 for 15%
-            const percentChangeContent = cells[3].innerText.trim().replace('%', '');
-            const percentChange = parseFloat(percentChangeContent) / 100;
+            const parsePct = (str) => {
+                if (!str) return null;
+                return parseFloat(str.replace('%', '')) / 100;
+            };
 
-            const weeklyContent = cells[4].innerText.trim().replace('%', '');
-            const weekly = parseFloat(weeklyContent) / 100;
+            if (cells.length >= 8) {
+                const price = parseVal(cells[1].innerText.trim());
+                const change = parseVal(cells[2].innerText.trim());
+                const percentChange = parsePct(cells[3].innerText.trim());
+                const weekly = parsePct(cells[4].innerText.trim());
+                const monthly = parsePct(cells[5].innerText.trim());
+                const ytd = parsePct(cells[6].innerText.trim());
+                const yoy = parsePct(cells[7].innerText.trim());
 
-            const monthlyContent = cells[5].innerText.trim().replace('%', '');
-            const monthly = parseFloat(monthlyContent) / 100;
-
-            const ytdContent = cells[6].innerText.trim().replace('%', '');
-            const ytd = parseFloat(ytdContent) / 100;
-
-            const yoyContent = cells[7].innerText.trim().replace('%', '');
-            const yoy = parseFloat(yoyContent) / 100;
-
-            if (!isNaN(price) && rawName) {
-                data.push({
-                    name,
-                    price,
-                    change,
-                    percentChange,
-                    weekly,
-                    monthly,
-                    ytd,
-                    yoy
-                });
+                if (!isNaN(price) && rawName) {
+                    data.push({
+                        name,
+                        price,
+                        change,
+                        percentChange,
+                        weekly,
+                        monthly,
+                        ytd,
+                        yoy
+                    });
+                }
             }
         });
         return data;
-    });
+    }, whitelist);
 
-    console.log(`Extracted ${commodities.length} commodities.`);
-    await browser.close();
-    return commodities;
+    await page.close();
+    return items;
 }
 
-async function updateNotion(commodities) {
+// Helper to launch browser
+async function launchBrowser() {
+    return await puppeteer.launch({
+        headless: "new",
+        args: ['--no-sandbox'] // Exact match to inspect_stocks.js
+    });
+}
+
+const { execSync } = require('child_process');
+
+async function scrapeStocks() {
+    console.log('Scraping Stocks (Subprocess)...');
+    try {
+        // Run the verified inspection script
+        const stdout = execSync('node inspect_stocks.js', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
+        const items = JSON.parse(stdout);
+        console.log(`Extracted ${items.length} stock indices.`);
+        return items;
+    } catch (e) {
+        console.error('Error scraping stocks (subprocess):', e.message);
+        return [];
+    }
+}
+
+async function scrapeAll() {
+    let commodities = [];
+    let stocks = [];
+
+    // 1. Scrape Stocks FIRST (Test Sequencing Hypothesis)
+    try {
+        stocks = await scrapeStocks();
+    } catch (e) {
+        console.error('Final stock scrape failed:', e);
+    }
+
+    // 2. Scrape Commodities
+    console.log('Scraping Commodities...');
+    const browser1 = await launchBrowser();
+    try {
+        commodities = await scrapeTable(browser1, COMMODITIES_URL, null, 'commodities');
+        console.log(`Extracted ${commodities.length} commodities.`);
+    } catch (e) {
+        console.error('Error scraping commodities:', e);
+    } finally {
+        await browser1.close();
+    }
+
+    return [...commodities, ...stocks];
+}
+
+async function updateNotion(items) {
     if (!process.env.NOTION_TOKEN || !NOTION_DATABASE_ID) {
         console.warn('Missing Notion credentials. Skipping Notion update.');
-        console.log('Sample Data:', commodities.slice(0, 5));
+        console.log('Sample Data:', items.slice(0, 5));
         return;
     }
 
@@ -115,7 +165,6 @@ async function updateNotion(commodities) {
     let hasMore = true;
     let startCursor = undefined;
 
-    // Pagination loop
     while (hasMore) {
         const response = await notion.databases.query({
             database_id: NOTION_DATABASE_ID,
@@ -125,7 +174,6 @@ async function updateNotion(commodities) {
         response.results.forEach(page => {
             const titleProp = page.properties.Name;
             if (titleProp && titleProp.title) {
-                // Safely join all text parts to get the full name
                 const name = titleProp.title.map(t => t.plain_text).join('');
                 if (name) {
                     existingItems.set(name, page.id);
@@ -138,15 +186,18 @@ async function updateNotion(commodities) {
     }
 
     console.log(`Found ${existingItems.size} existing items.`);
-    console.log('Updating/Creating Notion pages...');
+    console.log(`Updating/Creating ${items.length} Notion pages...`);
 
-    for (const item of commodities) {
+    let updated = 0;
+    let created = 0;
+
+    for (const item of items) {
         const existingPageId = existingItems.get(item.name);
 
         try {
             const properties = {
                 'Price': { number: isNaN(item.price) ? null : item.price },
-                'Change': { number: isNaN(item.change) ? null : item.change },
+                'Day': { number: isNaN(item.change) ? null : item.change }, // Prop name in DB is 'Day'
                 '% Change': { number: isNaN(item.percentChange) ? null : item.percentChange },
                 'Weekly': { number: isNaN(item.weekly) ? null : item.weekly },
                 'Monthly': { number: isNaN(item.monthly) ? null : item.monthly },
@@ -155,31 +206,31 @@ async function updateNotion(commodities) {
             };
 
             if (existingPageId) {
-                // Update
                 process.stdout.write(`.`);
                 await notion.pages.update({
                     page_id: existingPageId,
                     properties: properties
                 });
+                updated++;
             } else {
-                // Create
                 process.stdout.write(`+`);
                 properties['Name'] = { title: [{ text: { content: item.name } }] };
                 await notion.pages.create({
                     parent: { database_id: NOTION_DATABASE_ID },
                     properties: properties
                 });
+                created++;
             }
         } catch (error) {
             console.error(`\nFailed to sync ${item.name}:`, error.message);
         }
     }
-    console.log('\nSync complete.');
+    console.log(`\nSync complete. Updated: ${updated}, Created: ${created}.`);
 }
 
 (async () => {
     try {
-        const data = await scrapeCommodities();
+        const data = await scrapeAll();
         if (data.length > 0) {
             await updateNotion(data);
         } else {

@@ -81,103 +81,148 @@ async function fetchVDSCReports() {
             });
         });
 
-        // 1. Login
-        console.log('🔑 Logging in to VDSC...');
-        await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' });
+        // 0. Cookie Auth (Bypass CAPTCHA)
+        const rawCookies = process.env.VDSC_COOKIES;
+        let cookieAuthSuccess = false;
 
-        // Wait for password field to ensure form is loaded
-        try {
-            await page.waitForSelector('input[type="password"]', { timeout: 15000 });
-        } catch (e) {
-            console.error('❌ Error: Login form not found.');
-            await page.screenshot({ path: 'vdsc_login_error.png' });
-            throw e;
-        }
+        if (rawCookies) {
+            console.log('🍪 Found VDSC_COOKIES, attempting cookie auth...');
+            const cookies = rawCookies.split(';').map(c => {
+                const parts = c.trim().split('=');
+                if (parts.length < 2) return null;
+                return {
+                    name: parts[0],
+                    value: parts.slice(1).join('='),
+                    domain: 'vdsc.com.vn',
+                    path: '/',
+                };
+            }).filter(c => c);
 
-        // Fill form with event triggering and Tabbing
-        const usernameSelector = 'input[placeholder="Tên đăng nhập"], input[name="username"], input[name="email"]';
-        // Focus and type with delay
-        try {
-            await page.focus(usernameSelector);
-            await page.keyboard.type(email, { delay: 100 });
-            await page.keyboard.press('Tab'); // Trigger blur
+            if (cookies.length > 0) {
+                await page.setCookie(...cookies);
+                console.log(`   Set ${cookies.length} cookies.`);
 
-            await page.focus('input[type="password"]');
-            await page.keyboard.type(password, { delay: 100 });
-            await page.keyboard.press('Tab'); // Trigger blur
-        } catch (typeErr) {
-            console.log('Error typing credentials:', typeErr.message);
-            // Fallback to standard type
-            await page.type(usernameSelector, email);
-            await page.type('input[type="password"]', password);
-        }
+                // Verify
+                await page.goto('https://vdsc.com.vn/trung-tam-phan-tich', { waitUntil: 'domcontentloaded' });
+                const isLoggedIn = await page.evaluate(() => !document.querySelector('a[href*="dang-nhap"]'));
 
-        // Trigger input events explicitly
-        await page.evaluate(() => {
-            const inputs = document.querySelectorAll('input');
-            inputs.forEach(input => {
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-                input.dispatchEvent(new Event('change', { bubbles: true }));
-                input.dispatchEvent(new Event('blur', { bubbles: true }));
-            });
-        });
-
-        // Click Login Button
-        const loginBtnSelector = '.login-button';
-        try {
-            // Wait for button to be enabled
-            await page.waitForFunction((selector) => {
-                const btn = document.querySelector(selector);
-                return btn && !btn.disabled;
-            }, { timeout: 5000 }, loginBtnSelector);
-
-            await Promise.all([
-                page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }),
-                page.click(loginBtnSelector)
-            ]);
-            console.log('Clicked login button.');
-        } catch (e) {
-            console.log('Login button not enabled or click failed, trying direct form submission...');
-            try {
-                await page.evaluate(() => {
-                    const form = document.querySelector('form');
-                    if (form) {
-                        form.submit();
-                    } else {
-                        throw new Error('No form found');
-                    }
-                });
-                await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 });
-                console.log('Submitted form directly.');
-            } catch (submitErr) {
-                console.log('Direct form submission failed:', submitErr.message);
-
-                // Last resort: Enter key
-                try {
-                    await page.focus('input[type="password"]');
-                    await Promise.all([
-                        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }),
-                        page.keyboard.press('Enter')
-                    ]);
-                    console.log('Pressed Enter key.');
-                } catch (enterErr) {
-                    console.log('Enter key navigation timed out or failed.');
+                if (isLoggedIn) {
+                    console.log('✅ Cookie Auth Success!');
+                    cookieAuthSuccess = true;
+                } else {
+                    console.warn('⚠️ Cookie Auth Failed (Cookies might be expired). Falling back to password login...');
                 }
             }
         }
 
-        // Verify Login
-        const isLoggedIn = await page.evaluate(() => {
-            const loginLink = Array.from(document.querySelectorAll('a')).find(a => a.innerText.includes('Đăng nhập'));
-            return !loginLink;
-        });
+        if (!cookieAuthSuccess) {
+            // 1. Password Login
+            console.log('🔑 Logging in to VDSC (Password)...');
+            await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' });
 
-        if (!isLoggedIn) {
-            console.error('❌ Error: Login failed. "Đăng nhập" link still visible.');
-            await page.screenshot({ path: 'vdsc_login_failed_check.png' });
-            // Don't exit yet, maybe it's a false negative, but warn loudly
-        } else {
-            console.log('✅ Login verified (Login link gone).');
+            // Check for CAPTCHA
+            const hasCaptcha = await page.evaluate(() => document.querySelector('.g-recaptcha') !== null || document.querySelector('iframe[src*="recaptcha"]') !== null);
+            if (hasCaptcha) {
+                console.warn('⚠️ WARNING: CAPTCHA detected. Login requires manual intervention or valid VDSC_COOKIES.');
+            }
+
+            // Wait for password field to ensure form is loaded
+            try {
+                await page.waitForSelector('input[type="password"]', { timeout: 15000 });
+            } catch (e) {
+                console.error('❌ Error: Login form not found.');
+                await page.screenshot({ path: 'vdsc_login_error.png' });
+                throw e;
+            }
+
+            // Fill form with event triggering and Tabbing
+            const usernameSelector = 'input[placeholder="Tên đăng nhập"], input[name="username"], input[name="email"]';
+            // Focus and type with delay
+            try {
+                await page.focus(usernameSelector);
+                await page.keyboard.type(email, { delay: 100 });
+                await page.keyboard.press('Tab'); // Trigger blur
+
+                await page.focus('input[type="password"]');
+                await page.keyboard.type(password, { delay: 100 });
+                await page.keyboard.press('Tab'); // Trigger blur
+            } catch (typeErr) {
+                console.log('Error typing credentials:', typeErr.message);
+                // Fallback to standard type
+                await page.type(usernameSelector, email);
+                await page.type('input[type="password"]', password);
+            }
+
+            // Trigger input events explicitly
+            await page.evaluate(() => {
+                const inputs = document.querySelectorAll('input');
+                inputs.forEach(input => {
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    input.dispatchEvent(new Event('blur', { bubbles: true }));
+                });
+            });
+
+            // Click Login Button
+            const loginBtnSelector = '.login-button';
+            try {
+                // Wait for button to be enabled
+                await page.waitForFunction((selector) => {
+                    const btn = document.querySelector(selector);
+                    return btn && !btn.disabled && btn.offsetParent !== null; // Ensure visible
+                }, { timeout: 5000 }, loginBtnSelector);
+
+                console.log('Clicking login button...');
+                await new Promise(r => setTimeout(r, 2000)); // Wait a bit for JS glue
+
+                await Promise.all([
+                    page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 60000 }), // robust wait
+                    page.click(loginBtnSelector)
+                ]);
+                console.log('Clicked login button and navigated.');
+            } catch (e) {
+                console.log('Login button click issue, trying evaluate click...', e.message);
+                try {
+                    await page.evaluate(() => {
+                        const form = document.querySelector('form');
+                        if (form) {
+                            form.submit();
+                        } else {
+                            throw new Error('No form found');
+                        }
+                    });
+                    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 });
+                    console.log('Submitted form directly.');
+                } catch (submitErr) {
+                    console.log('Direct form submission failed:', submitErr.message);
+
+                    // Last resort: Enter key
+                    try {
+                        await page.focus('input[type="password"]');
+                        await Promise.all([
+                            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }),
+                            page.keyboard.press('Enter')
+                        ]);
+                        console.log('Pressed Enter key.');
+                    } catch (enterErr) {
+                        console.log('Enter key navigation timed out or failed.');
+                    }
+                }
+            }
+
+            // Verify Login
+            const isLoggedIn = await page.evaluate(() => {
+                const loginLink = Array.from(document.querySelectorAll('a')).find(a => a.innerText.includes('Đăng nhập'));
+                return !loginLink;
+            });
+
+            if (!isLoggedIn) {
+                console.error('❌ Error: Login failed. "Đăng nhập" link still visible.');
+                await page.screenshot({ path: 'vdsc_login_failed_check.png' });
+                // Don't exit yet, maybe it's a false negative, but warn loudly
+            } else {
+                console.log('✅ Login verified (Login link gone).');
+            }
         }
 
         // 2. Scrape Reports
@@ -337,6 +382,75 @@ async function fetchVDSCReports() {
                     return normalizedDate === today;
                 });
                 console.log(`   🎯 Today's: ${todays.length}`);
+
+                // Resolve file links for today's reports
+                for (const report of todays) {
+                    try {
+                        console.log(`      🔗 Resolving file link for: ${report.title}`);
+                        if (report.link.includes('/data/api/app/file-storage')) {
+                            console.log('      ✅ Already a file link.');
+                            continue;
+                        }
+
+                        // Open detail page
+                        await page.goto(report.link, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+                        // Look for download link
+                        // Strategy 1: Link with file-storage in href
+                        // Strategy 2: Button with text "Tải về" or "Download"
+                        const fileLink = await page.evaluate(() => {
+                            const params = new URLSearchParams(window.location.search);
+                            if (params.has('returnUrl')) {
+                                // We are redirected to login, meaning session lost or protected.
+                                // But if we are here, we might see the login page.
+                                // Proceeding to try finding link might fail.
+                                return null;
+                            }
+
+                            const anchors = Array.from(document.querySelectorAll('a'));
+                            const fileAnchor = anchors.find(a => a.href && a.href.includes('/data/api/app/file-storage'));
+                            if (fileAnchor) return fileAnchor.href;
+
+                            // Checks for "Tải file" or "Download"
+                            const downloadAnchor = anchors.find(a => {
+                                const text = a.innerText.toLowerCase();
+                                return text.includes('tải về') || text.includes('download') || text.includes('tải file');
+                            });
+                            if (downloadAnchor) return downloadAnchor.href;
+
+                            // Check for iframe source (sometimes PDF viewer)
+                            const iframe = document.querySelector('iframe[src*="file-storage"]');
+                            if (iframe) return iframe.src;
+
+                            return null;
+                        });
+
+                        if (fileLink) {
+                            console.log(`      ✅ Found file link: ${fileLink}`);
+                            report.link = fileLink;
+                        } else {
+                            console.warn('      ⚠️ Could not find file link on detail page. Keeping original.');
+                        }
+
+                        // Go back or just continue (we are reusing valid session in 'page')
+                        // Since we navigated 'page' away, we can't easily go back to the list state without reloading.
+                        // Ideally we should have opened a new tab, but reusing 'page' is fine if we process one by one
+                        // and don't need the list anymore (we already have 'todays' array).
+                        // BUT the loop 'for (const url of REPORT_URLS)' re-uses 'page' for the NEXT URL?
+                        // No, 'page' is scoped to the loop: 'let page; ... page = await browser.newPage()'.
+                        // So effectively we are trashing 'page' for the list.
+                        // That's fine for the NEXT iteration of todays?
+                        // Wait! 'reports' array loop.
+                        // If 'todays' has 2 items.
+                        // Item 1: Navigate 'page' to Detail 1.
+                        // Item 2: 'page' is now at Detail 1. We try to go to Detail 2 URL.
+                        // Puppeteer 'page.goto' works from anywhere. So it's fine.
+
+                    } catch (e) {
+                        console.error(`      ❌ Error resolving file link: ${e.message}`);
+                    }
+                }
+
                 allReports.push(...todays);
 
                 await page.close(); // Close page after success
