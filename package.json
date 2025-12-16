@@ -13,10 +13,11 @@
     "dependencies": {
         "@google/generative-ai": "^0.2.1",
         "@mozilla/readability": "^0.5.0",
-        "@notionhq/client": "^2.2.15",
+        "@notionhq/client": "^2.3.0",
         "axios": "^1.7.9",
+        "dotenv": "^17.2.3",
         "jsdom": "^25.0.1",
-        "puppeteer": "^23.10.1",
+        "puppeteer": "^23.11.1",
         "rss-parser": "^3.13.0",
         "yahoo-finance2": "^3.10.2"
     }

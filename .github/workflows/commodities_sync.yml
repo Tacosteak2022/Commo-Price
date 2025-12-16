@@ -1,0 +1,28 @@
+name: Commodities Sync
+
+on:
+  schedule:
+    - cron: '0 * * * *' # Run hourly
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm install
+        working-directory: ./ # Adjust if in a subdirectory, but based on current scratch, it's root or handled by repo structure
+
+      - name: Run Commodities Feeder
+        run: node commodities_feeder.js
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
