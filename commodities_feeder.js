@@ -114,7 +114,6 @@ const { execSync } = require('child_process');
 async function scrapeStocks() {
     console.log('Scraping Stocks (Subprocess)...');
     try {
-        // Run the verified inspection script
         const stdout = execSync('node inspect_stocks.js', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
         const items = JSON.parse(stdout);
         console.log(`Extracted ${items.length} stock indices.`);
@@ -125,18 +124,60 @@ async function scrapeStocks() {
     }
 }
 
+async function scrapeCurrencies() {
+    console.log('Scraping Currencies (Subprocess)...');
+    try {
+        const stdout = execSync('node inspect_currencies.js', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
+        const items = JSON.parse(stdout);
+        console.log(`Extracted ${items.length} currencies.`);
+        return items;
+    } catch (e) {
+        console.error('Error scraping currencies (subprocess):', e.message);
+        return [];
+    }
+}
+
+async function scrapeBonds() {
+    console.log('Scraping Bonds (Subprocess)...');
+    try {
+        const stdout = execSync('node inspect_bonds.js', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
+        const items = JSON.parse(stdout);
+        console.log(`Extracted ${items.length} bonds.`);
+        return items;
+    } catch (e) {
+        console.error('Error scraping bonds (subprocess):', e.message);
+        return [];
+    }
+}
+
 async function scrapeAll() {
     let commodities = [];
     let stocks = [];
+    let currencies = [];
+    let bonds = [];
 
-    // 1. Scrape Stocks FIRST (Test Sequencing Hypothesis)
+    // 1. Scrape Stocks
     try {
         stocks = await scrapeStocks();
     } catch (e) {
         console.error('Final stock scrape failed:', e);
     }
 
-    // 2. Scrape Commodities
+    // 2. Scrape Currencies
+    try {
+        currencies = await scrapeCurrencies();
+    } catch (e) {
+        console.error('Final currency scrape failed:', e);
+    }
+
+    // 3. Scrape Bonds
+    try {
+        bonds = await scrapeBonds();
+    } catch (e) {
+        console.error('Final bond scrape failed:', e);
+    }
+
+    // 4. Scrape Commodities
     console.log('Scraping Commodities...');
     const browser1 = await launchBrowser();
     try {
@@ -148,7 +189,7 @@ async function scrapeAll() {
         await browser1.close();
     }
 
-    return [...commodities, ...stocks];
+    return [...commodities, ...stocks, ...currencies, ...bonds];
 }
 
 async function updateNotion(items) {
