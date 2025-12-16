@@ -15,6 +15,7 @@ async function scrapeCommodities() {
     const page = await browser.newPage();
 
     console.log(`Navigating to ${TARGET_URL}...`);
+    // Set a realistic user agent
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
 
     await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 60000 });
@@ -22,6 +23,13 @@ async function scrapeCommodities() {
     console.log('Extracting data...');
     const commodities = await page.evaluate(() => {
         const data = [];
+        // The table structure on Trading Economics often uses specific classes or IDs.
+        // Based on inspection, we look for rows in the main table.
+        // We'll try to find the main table by looking for headers like 'Price', 'Change', etc.
+
+        // Strategy: specific rows often have attributes like 'data-symbol' or are within a specific table class.
+        // Let's iterate over ALL rows in tables that look like data tables.
+
         const rows = document.querySelectorAll('tr');
 
         rows.forEach(row => {
@@ -55,20 +63,22 @@ async function scrapeCommodities() {
 
             const price = parseFloat(cells[1].innerText.trim().replace(/,/g, ''));
             const change = parseFloat(cells[2].innerText.trim().replace(/,/g, ''));
+
+            // For percentages, we divide by 100 because Notion expects 0.15 for 15%
             const percentChangeContent = cells[3].innerText.trim().replace('%', '');
-            const percentChange = parseFloat(percentChangeContent);
+            const percentChange = parseFloat(percentChangeContent) / 100;
 
             const weeklyContent = cells[4].innerText.trim().replace('%', '');
-            const weekly = parseFloat(weeklyContent);
+            const weekly = parseFloat(weeklyContent) / 100;
 
             const monthlyContent = cells[5].innerText.trim().replace('%', '');
-            const monthly = parseFloat(monthlyContent);
+            const monthly = parseFloat(monthlyContent) / 100;
 
             const ytdContent = cells[6].innerText.trim().replace('%', '');
-            const ytd = parseFloat(ytdContent);
+            const ytd = parseFloat(ytdContent) / 100;
 
             const yoyContent = cells[7].innerText.trim().replace('%', '');
-            const yoy = parseFloat(yoyContent);
+            const yoy = parseFloat(yoyContent) / 100;
 
             if (!isNaN(price) && rawName) {
                 data.push({
@@ -114,9 +124,12 @@ async function updateNotion(commodities) {
 
         response.results.forEach(page => {
             const titleProp = page.properties.Name;
-            if (titleProp && titleProp.title && titleProp.title.length > 0) {
-                const name = titleProp.title[0].plain_text;
-                existingItems.set(name, page.id);
+            if (titleProp && titleProp.title) {
+                // Safely join all text parts to get the full name
+                const name = titleProp.title.map(t => t.plain_text).join('');
+                if (name) {
+                    existingItems.set(name, page.id);
+                }
             }
         });
 
