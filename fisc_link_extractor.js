@@ -41,27 +41,23 @@ async function fetchReportLinks() {
     const notionDbId = process.env.NOTION_READER_DATABASE_ID;
 
     if (!email || !password) {
-        console.warn('⚠️ Warning: FISC_EMAIL or FISC_PASSWORD is not set in .env. Reliance on Persistent Profile only.');
-        // process.exit(1); // Don't exit, try profile
+        console.error('❌ Error: FISC_EMAIL or FISC_PASSWORD is not set.');
+        process.exit(1);
     }
 
     if (!notionKey || !notionDbId) {
-        console.warn('⚠️ Warning: Notion secrets are missing. Reports will be fetched but NOT synced.');
-        // process.exit(1);
+        console.error('❌ Error: Notion secrets are missing.');
+        process.exit(1);
     }
 
     const notion = new Client({ auth: notionKey });
     let browser;
-    // IMPORTANT: Use the same profile folder as setup script
-    const USER_DATA_DIR = path.join(__dirname, 'browser_profile');
 
     try {
-        console.log('🚀 Launching FRESH browser (Persistent Profile)...');
+        console.log('🚀 Launching browser...');
         browser = await puppeteer.launch({
-            headless: false,
-            defaultViewport: null,
-            userDataDir: USER_DATA_DIR,
-            args: ['--start-maximized', '--no-sandbox', '--disable-setuid-sandbox']
+            headless: "new",
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
         });
         const page = await browser.newPage();
 
@@ -79,50 +75,91 @@ async function fetchReportLinks() {
             });
         });
 
-        // 1. Check if already logged in (via cookies/profile)
-        console.log('🔑 Checking session from profile...');
-        await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        // 1. Login
+        console.log('🔑 Logging in...');
+        await page.goto(LOGIN_URL, { waitUntil: 'networkidle0' });
 
-        const isAlreadyLoggedIn = await page.evaluate(() => {
-            return !document.querySelector('button.g-recaptcha') &&
-                !Array.from(document.querySelectorAll('a')).some(a => a.innerText.includes('Đăng nhập'));
-        });
+        await page.type('input[name="email"]', email);
+        await page.type('input[name="password"]', password);
 
-        if (isAlreadyLoggedIn) {
-            console.log('✅ PROFILE VALID! Already logged in.');
-        } else {
-            console.log('⚠️ Profile not logged in.');
-            console.log('👉 ACTION REQUIRED: Please log in manually in the browser window NOW.');
-
-            // Wait for login success signal (URL change or button disappearance)
-            try {
-                await page.waitForFunction(() => {
-                    return !document.querySelector('button.g-recaptcha') &&
-                        !Array.from(document.querySelectorAll('a')).some(a => a.innerText.includes('Đăng nhập'));
-                }, { timeout: 300000 }); // 5 minutes
-                console.log('✅ Manual login detected!');
-            } catch (e) {
-                console.error('❌ Login timeout. Exiting.');
-                process.exit(1);
+        // Click "Remember Me" if available (Robustly)
+        try {
+            const rememberLabel = await page.$('label[for="account"]');
+            if (rememberLabel) {
+                await rememberLabel.click();
+            } else {
+                // Fallback to JS click
+                await page.evaluate(() => {
+                    const cb = document.getElementById('account');
+                    if (cb) cb.click();
+                });
             }
+        } catch (e) {
+            console.log('⚠️ Could not click Remember Me checkbox (non-fatal)');
         }
 
+        // Click Login Button by Text "Đăng nhập"
+        try {
+            await page.evaluate(() => {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                const loginBtn = buttons.find(b => b.innerText.includes('Đăng nhập'));
+                if (loginBtn) {
+                    loginBtn.click();
+                } else {
+                    // Fallback to class
+                    document.querySelector('button.g-recaptcha').click();
+                }
+            });
+            await page.waitForNavigation({ waitUntil: 'networkidle0' });
+        } catch (e) {
+            console.error('❌ Error clicking login button:', e.message);
+            await page.screenshot({ path: 'login_click_error.png' });
+            throw e;
+        }
+
+        // Debug: Log cookies
+        const cookies = await page.cookies();
+        console.log('🍪 Cookies after login:', cookies.map(c => `${c.name}=${c.value.substring(0, 10)}...`).join(', '));
+
+        // Wait a bit for session to settle
+        console.log('⏳ Waiting 5s for session to settle...');
+        await new Promise(r => setTimeout(r, 5000));
+
+        // 1.5 Check Homepage (to validate session)
+        console.log('🏠 Visiting homepage to validate session...');
+        await page.goto('https://fisc.vn/', { waitUntil: 'networkidle0' });
+        const isLoggedInHome = await page.evaluate(() => {
+            return document.body.innerText.includes('Tài khoản') || !document.body.innerText.includes('Đăng nhập');
+        });
+        console.log(`   Logged in on Homepage? ${isLoggedInHome}`);
+
+        // 2. Go to Report Page
         console.log('🔍 Navigating to reports...');
-        await page.goto(REPORT_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await page.goto(REPORT_URL, { waitUntil: 'networkidle0' });
 
         console.log(`📍 Current URL: ${page.url()}`);
+
         if (page.url().includes('login')) {
-            console.error('❌ Error: Login failed (Redirected to login page).');
-            // Check HTML
+            console.error('❌ Error: Login failed. Still on login page.');
+            await page.screenshot({ path: 'fisc_login_failed.png' });
+
+            // Dump HTML to see if there's an error message
             const html = await page.content();
-            if (html.includes('Tài khoản không tồn tại')) console.error("Reason: Account invalid.");
+            if (html.includes('Tài khoản không tồn tại') || html.includes('Mật khẩu không đúng')) {
+                console.error('❌ Reason: Invalid credentials or account does not exist.');
+            }
+            console.log('--- Login Page HTML Snippet ---');
+            console.log(html.substring(0, 2000)); // Print first 2000 chars
+
             process.exit(1);
         }
 
         try {
-            await page.waitForSelector('table tbody tr', { timeout: 15000 });
+            await page.waitForSelector('table tbody tr', { timeout: 10000 });
         } catch (e) {
-            console.error('⚠️ Timeout waiting for table rows (Page structure might be different).');
+            console.error('⚠️ Timeout waiting for table rows. We might not be logged in or the page structure changed.');
+            await page.screenshot({ path: 'debug_error.png' });
+            console.log('📸 Saved screenshot to debug_error.png');
         }
 
         // 3. Extract Data
@@ -132,14 +169,18 @@ async function fetchReportLinks() {
             rows.forEach(row => {
                 const cells = row.querySelectorAll('td');
                 if (cells.length < 2) return;
+
                 const date = cells[0]?.textContent?.trim();
                 const title = cells[1]?.textContent?.trim();
                 const source = cells[2]?.textContent?.trim();
                 const stockCode = cells[3]?.textContent?.trim();
+
                 const previewBtn = Array.from(row.querySelectorAll('a')).find(a => a.textContent.includes('Xem'));
                 if (previewBtn) {
                     let link = previewBtn.getAttribute('href');
-                    if (link && !link.startsWith('http')) link = `https://fisc.vn${link}`;
+                    if (link && !link.startsWith('http')) {
+                        link = `https://fisc.vn${link}`;
+                    }
                     data.push({ date, title, source, stockCode, link });
                 }
             });
@@ -148,44 +189,51 @@ async function fetchReportLinks() {
 
         console.log(`✅ Found ${reports.length} reports.`);
 
-        // 4. Notion Sync
+        // 4. Date Filter
         const today = new Date().toLocaleDateString('en-GB', { timeZone: 'Asia/Ho_Chi_Minh' });
         console.log(`📅 Today: ${today}`);
+
         const todaysReports = reports.filter(r => r.date === today);
         console.log(`🎯 Today's reports: ${todaysReports.length}`);
 
-        if (todaysReports.length > 0) {
-            console.log('🔄 Syncing with Notion...');
-            const existingPages = await notion.databases.query({
-                database_id: notionDbId,
-                page_size: 100,
-                sorts: [{ timestamp: 'created_time', direction: 'descending' }],
-            });
-            const existingLinks = new Set();
-            existingPages.results.forEach(page => {
-                if (page.properties.Link?.url) existingLinks.add(page.properties.Link.url);
-            });
+        if (todaysReports.length === 0) return;
 
-            for (const report of todaysReports) {
-                if (existingLinks.has(report.link)) {
-                    console.log(`⏭️ Skipping duplicate: ${report.title}`);
-                    continue;
-                }
-                console.log(`➕ Adding: ${report.title}`);
-                await notion.pages.create({
-                    parent: { database_id: notionDbId },
-                    properties: {
-                        "Title": { title: [{ text: { content: report.title } }] },
-                        "Link": { url: report.link },
-                        "Source": { rich_text: [{ text: { content: report.source || "" } }] },
-                        "Name": { rich_text: [{ text: { content: report.stockCode || "" } }] },
-                        "AI Summary": { rich_text: [{ text: { content: "FinSuccess Report - Direct Download" } }] }
-                    }
-                });
+        // 5. Notion Sync
+        console.log('🔄 Syncing with Notion...');
+        const existingPages = await notion.databases.query({
+            database_id: notionDbId,
+            page_size: 100,
+            sorts: [{ timestamp: 'created_time', direction: 'descending' }],
+        });
+
+        const existingLinks = new Set();
+        const existingTitles = new Set();
+
+        existingPages.results.forEach(page => {
+            if (page.properties.Link?.url) existingLinks.add(page.properties.Link.url);
+            if (page.properties.Title?.title?.[0]?.plain_text) existingTitles.add(page.properties.Title.title[0].plain_text);
+        });
+
+        let newCount = 0;
+        for (const report of todaysReports) {
+            if (existingLinks.has(report.link) || existingTitles.has(report.title)) {
+                console.log(`⏭️ Skipping duplicate: ${report.title}`);
+                continue;
             }
-        } else {
-            console.log("No reports for today found.");
+
+            console.log(`➕ Adding: ${report.title}`);
+            await notion.pages.create({
+                parent: { database_id: notionDbId },
+                properties: {
+                    "Title": { title: [{ text: { content: report.title } }] },
+                    "Link": { url: report.link },
+                    "Source": { rich_text: [{ text: { content: report.source || "" } }] },
+                    "Name": { rich_text: [{ text: { content: report.stockCode || "" } }] }
+                }
+            });
+            newCount++;
         }
+        console.log(`🎉 Added ${newCount} new reports.`);
 
     } catch (error) {
         console.error('❌ Error:', error.message);
